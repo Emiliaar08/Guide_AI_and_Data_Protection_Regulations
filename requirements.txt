@@ -1,4 +1,8 @@
+# API, интерфейс, тесты (Александра)
 fastapi
 uvicorn
 pytest
 httpx
+
+# Поиск и BM25 (Елена)
+pymorphy3

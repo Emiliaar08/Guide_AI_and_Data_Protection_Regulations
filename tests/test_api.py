@@ -50,6 +50,25 @@ def test_insufficient_when_llm_cites_nothing(monkeypatch):
     monkeypatch.setattr(answer, "call_llm", llm)
     assert post(GOOD).json()["status"] == "insufficient"
 
+def test_insufficient_when_llm_cites_nothing(monkeypatch):
+    async def llm(messages):
+        return "Ответ без ссылок на фрагменты."
+    monkeypatch.setattr(answer, "call_llm", llm)
+    assert post(GOOD).json()["status"] == "insufficient"
+
+def test_no_answer_marker_gives_insufficient(monkeypatch):
+    async def llm(messages):
+        return answer.NO_ANSWER
+    monkeypatch.setattr(answer, "call_llm", llm)
+    body = post(GOOD).json()
+    assert body["status"] == "insufficient" and body["citations"] == []
+
+
+def test_no_answer_marker_wins_over_citation(monkeypatch):
+    async def llm(messages):
+        return "NO_ANSWER, хотя тема близка к [D01]"
+    monkeypatch.setattr(answer, "call_llm", llm)
+    assert post(GOOD).json()["status"] == "insufficient"
 
 def test_insufficient_when_llm_cites_unknown_id(monkeypatch):
     async def llm(messages):
@@ -57,7 +76,6 @@ def test_insufficient_when_llm_cites_unknown_id(monkeypatch):
     monkeypatch.setattr(answer, "call_llm", llm)
     body = post(GOOD).json()
     assert body["status"] == "insufficient" and body["citations"] == []
-
 
 def test_need_clarification_skips_llm(monkeypatch):
     async def boom(messages):
@@ -105,3 +123,14 @@ def test_frontend_served_but_not_server_sources():
     assert client.get("/app.js").status_code == 200
     assert client.get("/server.py").status_code == 404
     assert client.get("/answer.py").status_code == 404
+
+def test_excerpt_cut_on_word_boundary():
+    from app.server import _excerpt
+    ex = _excerpt("слово " * 100, 50)
+    assert ex.endswith("…") and len(ex) <= 51
+    assert ex[:-1].split(" ")[-1] == "слово"
+    assert _excerpt("короткий текст", 50) == "короткий текст"
+
+
+def test_prompt_demands_no_answer_marker():
+    assert answer.NO_ANSWER in answer.build_messages("q", [])[0]["content"]

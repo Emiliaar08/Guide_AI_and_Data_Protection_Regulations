@@ -36,13 +36,20 @@ def _response(status: str, answer_text=None, question=None, citations=None) -> d
         "citations": citations or [],
     }
 
+def _excerpt(text: str, limit: int = EXCERPT_LEN) -> str:
+    """Начало текста не длиннее limit, обрезка по границе слова, с многоточием."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(" ,;:—-")
+    return cut + "…"
 
 def _citation(f) -> dict:
     return {
         "id": f.id,
         "doc_title": f.doc_title,
         "article": f.article,
-        "excerpt": f.text[:EXCERPT_LEN],
+        "excerpt": _excerpt(f.text),
         "jurisdiction": f.jurisdiction,
         "edition": f.edition,
         "url": f.url,
