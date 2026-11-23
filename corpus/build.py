@@ -24,10 +24,22 @@ ACTS = {
         "url": "https://mintrud.gov.ru/docs/laws/130",
         "source": "КонсультантПлюс",
         "edition": "ред. от 26.07.2026 (последние изменения — ФЗ от 26.07.2026 N 265-ФЗ)",
+        "part_word": "ч.",
+    },
+    "gdpr": {
+        "file": "gdpr_ru.txt",
+        "doc_title": "GDPR (Регламент ЕС 2016/679)",
+        "jurisdiction": "eu",
+        "url": "https://eur-lex.europa.eu/eli/reg/2016/679/oj/eng",
+        "source": "перевод Data Privacy Office, gdpr-text.com",
+        "edition": "Регламент (ЕС) 2016/679 с исправлениями (Corrigendum, OJ L 127, 23.5.2018); неофициальный перевод",
+        "part_word": "п.",
     },
 }
 
-# id, акт, номер статьи, части (None — вся статья; иначе (первая, последняя) по номерам частей)
+# id, акт, номер статьи, части:
+#   None — вся статья; ("1", "2") — части (параграфы) с номерами от 1 до 2;
+#   ["1", "2", "7"] — только перечисленные пункты вида «(1)» (для статей-определений).
 DOCS = [
     ("D01", "152fz", "3", None),
     ("D02", "152fz", "5", None),
@@ -39,12 +51,27 @@ DOCS = [
     ("D08", "152fz", "12", None),
     ("D09", "152fz", "16", None),
     ("D10", "152fz", "18.1", None),
+    ("D11", "gdpr", "4", ["1", "2", "7", "8", "11", "14"]),
+    ("D12", "gdpr", "5", None),
+    ("D13", "gdpr", "6", None),
+    ("D14", "gdpr", "9", None),
+    ("D15", "gdpr", "22", None),
+    ("D16", "gdpr", "28", ("1", "3")),
+    ("D17", "gdpr", "28", ("4", "10")),
+    ("D18", "gdpr", "35", None),
+    ("D19", "gdpr", "44", None),
+    ("D20", "gdpr", "46", None),
 ]
 
-ARTICLE_RE = re.compile(r"^Статья (\d+(?:\.\d+)?)\. (.+)$")
+ARTICLE_RE = re.compile(r"^Статья (\d+(?:\.\d+)?)(?: GDPR)?\. (.+)$")
 CHAPTER_RE = re.compile(r"^Глава \d+\.")
 PART_RE = re.compile(r"^(\d+(?:\.\d+)?)\. ")
 NOTE_HEADER = "КонсультантПлюс: примечание."
+POINT_RE = re.compile(r"^\((\d+)\)")
+# Служебные строки сайтов, которые копируются вместе с текстом
+SERVICE_LINES = {"Комментарий эксперта", "ISO 27701", "Руководство и прецедентное право", "Преамбулы",
+                 "Связанные статьи", "Скачать в PDF"}
+SERVICE_RE = re.compile(r"^\[(Комментарий эксперта|Связанные статьи)|^\[\d+\] |Болгарский \(bg\)")
 
 
 def read_raw(name: str) -> list[str]:
@@ -53,8 +80,10 @@ def read_raw(name: str) -> list[str]:
 
 
 def is_editorial(line: str) -> bool:
-    """Строка-пометка целиком в скобках: «(в ред. …)», «(введена …)», «(часть 3 в ред. …)»."""
-    return line.startswith("(") and line.endswith(")")
+    """Строка-пометка, а не текст нормы: «(в ред. …)», «(введена …)», служебные ссылки сайта."""
+    if line in SERVICE_LINES or SERVICE_RE.search(line):
+        return True
+    return line.startswith("(") and line.endswith(")") and not POINT_RE.match(line)
 
 
 def articles(lines: list[str]) -> dict[str, dict]:
@@ -99,11 +128,26 @@ def select_parts(lines: list[str], first: str, last: str) -> list[str]:
     return out
 
 
-def article_label(number: str, parts) -> str:
+def select_points(lines: list[str], points: list[str]) -> list[str]:
+    """Вводная строка статьи и пункты «(N)» из списка (со своими подпунктами)."""
+    out, inside, started = [], False, False
+    for line in lines:
+        m = POINT_RE.match(line)
+        if m:
+            started = True
+            inside = m.group(1) in points
+        if inside or not started:
+            out.append(line)
+    return out
+
+
+def article_label(number: str, parts, word: str) -> str:
     if parts is None:
         return f"ст. {number}"
+    if isinstance(parts, list):
+        return f"ст. {number} п. {', '.join(parts)}"
     first, last = parts
-    return f"ст. {number} ч. {first}" if first == last else f"ст. {number} ч. {first}–{last}"
+    return f"ст. {number} {word} {first}" if first == last else f"ст. {number} {word} {first}–{last}"
 
 
 def build() -> list[dict]:
@@ -114,14 +158,19 @@ def build() -> list[dict]:
         art = parsed[act_key].get(number)
         if art is None:
             raise ValueError(f"{doc_id}: в {act['file']} нет статьи {number}")
-        body = art["lines"] if parts is None else select_parts(art["lines"], *parts)
+        if parts is None:
+            body = art["lines"]
+        elif isinstance(parts, list):
+            body = select_points(art["lines"], parts)
+        else:
+            body = select_parts(art["lines"], *parts)
         if not body:
             raise ValueError(f"{doc_id}: пустой текст (статья {number}, части {parts})")
         docs.append({
             "id": doc_id,
             "doc_title": act["doc_title"],
             "jurisdiction": act["jurisdiction"],
-            "article": article_label(number, parts),
+            "article": article_label(number, parts, act["part_word"]),
             "text": f"Статья {number}. {art['title']}\n" + "\n".join(body),
             "url": act["url"],
             "source": act["source"],
