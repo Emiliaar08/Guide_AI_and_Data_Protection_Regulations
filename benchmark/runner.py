@@ -133,6 +133,32 @@ def run(options: Options = Options(), k: int = 5, answers: bool = False,
     }
 
 
+def sweep(options: Options, k: int, k1_values, b_values,
+          questions_path: Path = QUESTIONS_PATH, docs: list[dict] | None = None) -> list[dict]:
+    """Перебор k₁ и b при прочих равных: Recall@k и MRR для каждой пары."""
+    docs = load_docs() if docs is None else docs
+    questions = load_questions(questions_path)
+    rows = []
+    for k1 in k1_values:
+        for b in b_values:
+            opts = Options(**{**asdict(options), "k1": k1, "b": b})
+            metrics = summarize(run_retrieval(build_index(opts, docs), questions, k), k)
+            rows.append({"k1": k1, "b": b, f"recall@{k}": metrics[f"recall@{k}"], "mrr": metrics["mrr"]})
+    return rows
+
+
+def threshold_table(rows: list[dict], thresholds) -> list[dict]:
+    """Сколько обычных вопросов проходит порог и сколько вопросов без ответа им отсекается."""
+    top = {r["id"]: (r["found"][0]["score"] if r["found"] else 0.0) for r in rows}
+    normal = [r["id"] for r in rows if r["type"] == "normal"]
+    traps = [r["id"] for r in rows if r["type"] == "trap"]
+    return [{
+        "min_score": t,
+        "normal_kept": sum(top[q] >= t for q in normal), "normal_total": len(normal),
+        "traps_rejected": sum(top[q] < t for q in traps), "traps_total": len(traps),
+    } for t in thresholds]
+
+
 def rescore(path: Path) -> dict:
     """Пересчитать метрики после ручной разметки поля correct в сохранённом прогоне."""
     result = json.loads(path.read_text(encoding="utf-8"))

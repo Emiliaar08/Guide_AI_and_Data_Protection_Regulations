@@ -130,3 +130,13 @@ def test_cli_runs_without_saving(questions_file, monkeypatch, capsys):
     assert main(["--questions", str(questions_file), "--no-save", "--no-lemmatize"]) == 0
     out = capsys.readouterr().out
     assert "Recall@5" in out and "Q01" in out
+
+
+def test_sweep_and_threshold_table(questions_file):
+    rows = runner.sweep(PLAIN, 2, [1.2, 2.0], [0.75], questions_file, DOCS)
+    assert [(r["k1"], r["b"]) for r in rows] == [(1.2, 0.75), (2.0, 0.75)]
+    assert all(r["recall@2"] == pytest.approx(2 / 3) for r in rows)
+    result = runner.run(PLAIN, k=5, questions_path=questions_file, docs=DOCS)
+    table = runner.threshold_table(result["questions"], [0.1, 100])
+    assert table[0]["normal_kept"] == 1 and table[0]["traps_rejected"] == 1   # T01 ничего не нашёл
+    assert table[1]["normal_kept"] == 0 and table[1]["traps_rejected"] == 1
