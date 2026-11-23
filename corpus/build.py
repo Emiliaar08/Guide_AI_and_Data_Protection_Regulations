@@ -35,11 +35,21 @@ ACTS = {
         "edition": "Регламент (ЕС) 2016/679 с исправлениями (Corrigendum, OJ L 127, 23.5.2018); неофициальный перевод",
         "part_word": "п.",
     },
+    "aiact": {
+        "file": "ai_act_ru.txt",
+        "doc_title": "AI Act (Регламент ЕС 2024/1689)",
+        "jurisdiction": "eu",
+        "url": "https://eur-lex.europa.eu/eli/reg/2024/1689/oj/eng",
+        "source": "неофициальный перевод команды (LLM, вычитка), оригинал — EUR-Lex",
+        "edition": "консолидированная редакция от 27.07.2026 (с изменениями Регламента (ЕС) 2026/1744); неофициальный перевод",
+        "part_word": "п.",
+    },
 }
 
 # id, акт, номер статьи, части:
 #   None — вся статья; ("1", "2") — части (параграфы) с номерами от 1 до 2;
-#   ["1", "2", "7"] — только перечисленные пункты вида «(1)» (для статей-определений).
+#   ["1", "2", "7"] — только перечисленные пункты вида «(1)» (для статей-определений);
+#   необязательный пятый элемент — подпись статьи, если автоматическая не подходит.
 DOCS = [
     ("D01", "152fz", "3", None),
     ("D02", "152fz", "5", None),
@@ -61,6 +71,16 @@ DOCS = [
     ("D18", "gdpr", "35", None),
     ("D19", "gdpr", "44", None),
     ("D20", "gdpr", "46", None),
+    ("D21", "aiact", "3", ["1", "3", "4", "63"]),
+    ("D22", "aiact", "4", None),
+    ("D23", "aiact", "5", None, "ст. 5 п. 1, 1a, 1b"),
+    ("D24", "aiact", "6", None, "ст. 6 п. 1–4"),
+    ("D25", "aiact", "10", None),
+    ("D26", "aiact", "14", None),
+    ("D27", "aiact", "26", ("1", "6")),
+    ("D28", "aiact", "26", ("7", "12"), "ст. 26 п. 7–9, 11, 12"),
+    ("D29", "aiact", "50", None),
+    ("D30", "aiact", "53", None),
 ]
 
 ARTICLE_RE = re.compile(r"^Статья (\d+(?:\.\d+)?)(?: GDPR)?\. (.+)$")
@@ -153,7 +173,7 @@ def article_label(number: str, parts, word: str) -> str:
 def build() -> list[dict]:
     parsed = {key: articles(read_raw(act["file"])) for key, act in ACTS.items()}
     docs = []
-    for doc_id, act_key, number, parts in DOCS:
+    for doc_id, act_key, number, parts, *label in DOCS:
         act = ACTS[act_key]
         art = parsed[act_key].get(number)
         if art is None:
@@ -170,7 +190,7 @@ def build() -> list[dict]:
             "id": doc_id,
             "doc_title": act["doc_title"],
             "jurisdiction": act["jurisdiction"],
-            "article": article_label(number, parts, act["part_word"]),
+            "article": label[0] if label else article_label(number, parts, act["part_word"]),
             "text": f"Статья {number}. {art['title']}\n" + "\n".join(body),
             "url": act["url"],
             "source": act["source"],
