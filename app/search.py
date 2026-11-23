@@ -118,6 +118,10 @@ class Preprocessor:
             for size in range(min(self.max_phrase, len(terms) - i), 0, -1):
                 term = self.phrases.get(tuple(terms[i:i + size]))
                 if term:
+                    # Слово заменяется общим термом. Фраза остаётся как есть, а общий терм
+                    # добавляется после неё: иначе её слова («поручение») пропали бы из индекса.
+                    if size > 1:
+                        out.extend(terms[i:i + size])
                     out.append(term)
                     i += size
                     break

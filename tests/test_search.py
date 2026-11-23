@@ -165,3 +165,10 @@ def test_stopwords_and_synonyms_files_load():
     assert "и" in words and "не" not in words
     syn = s.load_synonyms()
     assert "_comment" not in syn and "статья" in syn
+
+
+def test_phrase_synonym_keeps_its_words():
+    pre = s.Preprocessor(s.Options(lemmatize=False, stopwords=False),
+                         synonyms={"процессор": ["лицо по поручению"], "оператор": ["контролер"]})
+    assert pre.terms("лицо по поручению") == ["лицо", "по", "поручению", "процессор"]
+    assert pre.terms("контролер") == ["оператор"]
