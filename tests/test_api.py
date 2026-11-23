@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from app import answer
 from app.server import app
+import pytest
 
 client = TestClient(app)
 GOOD = "Нужно ли согласие на обработку персональных данных?"
@@ -12,6 +13,11 @@ CITATION_FIELDS = {"doc_title", "article", "excerpt", "jurisdiction", "edition",
 def post(query, jurisdiction=None):
     return client.post("/api/search", json={"query": query, "jurisdiction": jurisdiction})
 
+@pytest.fixture(autouse=True)
+def stub_threshold(monkeypatch):
+    # баллы заглушки поиска — число совпавших слов (1–3), поэтому для тестов
+    # порог фиксируем отдельно от рабочего значения по умолчанию (3.0)
+    monkeypatch.setattr("app.server.MIN_SCORE", 1.0)
 
 def test_ok_has_answer_and_citations():
     r = post(GOOD)

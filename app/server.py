@@ -18,7 +18,7 @@ else:
     from .search_stub import search     # заглушка
 
 K = int(os.getenv("RAG_K", "5"))                       # сколько фрагментов берём из поиска
-MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "1.0"))   # ниже этого балла лучшего фрагмента: insufficient
+MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "3.0"))   # ниже этого балла лучшего фрагмента: insufficient
 EXCERPT_LEN = 300
 APP_DIR = Path(__file__).resolve().parent
 
