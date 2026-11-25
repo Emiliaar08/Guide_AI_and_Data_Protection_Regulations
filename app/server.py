@@ -10,7 +10,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import accounts, answer
+from . import accounts, answer, workspace
 
 if os.getenv("RAG_SEARCH", "stub") == "real":
     from .search import search          # настоящий BM25
@@ -99,4 +99,6 @@ class FrontendFiles(StaticFiles):
 
 # Интерфейс подключаем после маршрутов, иначе он перехватит /api/search
 app.include_router(accounts.router)
+app.include_router(accounts.router)
+app.include_router(workspace.router)
 app.mount("/", FrontendFiles(directory=APP_DIR, html=True), name="frontend")
