@@ -1,0 +1,15 @@
+# API, интерфейс, тесты (Александра)
+fastapi
+uvicorn
+pytest
+httpx
+
+# Поиск и BM25 (Елена)
+pymorphy3
+
+# Аккаунты и хранилище (Александра)
+sqlalchemy
+alembic
+psycopg[binary]
+redis
+email-validator
