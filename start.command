@@ -18,7 +18,7 @@ if [[ ! -x .venv/bin/python ]]; then
   "$navigator_python" -m venv .venv
 fi
 navigator_python="$PWD/.venv/bin/python"
-if ! "$navigator_python" -c 'import fastapi, uvicorn, httpx, pymorphy3' 2>/dev/null; then
+if ! "$navigator_python" -c 'import fastapi, uvicorn, httpx, pymorphy3, sqlalchemy, redis, psycopg, email_validator' 2>/dev/null; then
   "$navigator_python" -m pip install -r requirements.txt
 fi
 

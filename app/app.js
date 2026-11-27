@@ -7,6 +7,20 @@
   const pending = new Map();
   let user = null;
   let state;
+  let sessionEpoch = 0;
+  let sessionChecking = true;
+  let transitionBusy = false;
+  let workspaceReady = true;
+  let guestImport = [];
+  let guestSelection = null;
+  let authIntent = null;
+  let writeQueue = Promise.resolve();
+  let notice = null;
+  const failedWrites = new Map();
+  const latestWrites = new Map();
+  const favoriteOperations = new Set();
+  const deletingChats = new Set();
+  const chatRevisions = new Map();
   let page = ['chat', 'sources', 'compare', 'saved'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'chat';
   let sourceFilter = 'all';
   let savedTab = 'answers';
@@ -24,43 +38,206 @@
   const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
   const docFor = documentId => documents.find(item => item.id === documentId);
   const activeChat = () => state.chats.find(item => item.id === state.activeChatId);
-  const storageKey = () => `pravo-ryadom:workspace-v2:${user ? encodeURIComponent(user.id) : 'guest'}`;
+  const storageKey = () => `pravo-ryadom:preferences-v1:${encodeURIComponent(user.id)}`;
   const shortDate = date => new Intl.DateTimeFormat('ru', { day: 'numeric', month: 'short' }).format(new Date(date));
   const time = date => new Intl.DateTimeFormat('ru', { hour: '2-digit', minute: '2-digit' }).format(new Date(date));
   const icon = name => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
   const plural = (n, forms) => forms[n % 100 > 10 && n % 100 < 20 ? 2 : n % 10 === 1 ? 0 : n % 10 > 1 && n % 10 < 5 ? 1 : 2];
-  state = loadState();
+  const emptyState = () => ({ chats: [], favoriteArticles: [], favoriteAnswers: [], activeChatId: null });
+  state = emptyState();
 
-  function loadState() {
-    const empty = { chats: [], favoriteArticles: [], favoriteAnswers: [], activeChatId: null };
+  function readPreferences() {
+    if (!user) return {};
     try {
-      const raw = localStorage.getItem(storageKey());
-      if (!raw) {
-        // Существующие закладки на документы превращаются в закладки на их статьи.
-        if (!user) {
-          const oldSaved = JSON.parse(localStorage.getItem('pravo-ryadom:saved-v1') || '[]');
-          if (Array.isArray(oldSaved)) empty.favoriteArticles = articles.filter(item => oldSaved.includes(item.documentId)).map(item => item.id);
-        }
-        return empty;
-      }
-      const stored = JSON.parse(raw);
-      if (!stored || typeof stored !== 'object') return empty;
-      const chats = Array.isArray(stored.chats) ? stored.chats.filter(chat => chat && typeof chat.id === 'string' && Array.isArray(chat.messages)).map(chat => ({
-        ...chat,
-        messages: chat.messages.filter(message => message && ['user', 'assistant'].includes(message.role) && typeof message.text === 'string').map(message => ({ ...message, status: message.status === 'pending' ? 'interrupted' : message.status }))
-      })) : [];
-      return {
-        chats,
-        favoriteArticles: Array.isArray(stored.favoriteArticles) ? stored.favoriteArticles.filter(key => typeof key === 'string') : [],
-        favoriteAnswers: Array.isArray(stored.favoriteAnswers) ? stored.favoriteAnswers.filter(item => item?.message?.role === 'assistant' && typeof item.message.text === 'string') : [],
-        activeChatId: chats.some(chat => chat.id === stored.activeChatId) ? stored.activeChatId : null
-      };
-    } catch { return empty; }
+      const value = JSON.parse(localStorage.getItem(storageKey()) || '{}');
+      return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    } catch { return {}; }
   }
-
   function persist() {
-    try { localStorage.setItem(storageKey(), JSON.stringify(state)); }
-    catch { notify('Не удалось сохранить изменения в браузере.'); }
+    if (!user || !workspaceReady) return;
+    const drafts = {};
+    for (const chat of state.chats) {
+      if (chat.draft) drafts[chat.id] = { text: chat.draft, jurisdiction: chat.jurisdiction || '', createdAt: chat.createdAt };
+    }
+    try { localStorage.setItem(storageKey(), JSON.stringify({ activeChatId: state.activeChatId, drafts })); }
+    catch { notify('Не удалось сохранить черновик в браузере.'); }
+  }
+  function showNotice(text, action = 'retry') {
+    notice = text ? { text, action } : null;
+    renderStatus();
+  }
+  function renderStatus() {
+    const element = document.getElementById('workspace-status');
+    element.hidden = !notice;
+    element.innerHTML = notice ? `<span>${escape(notice.text)}</span>${notice.action === 'retry' ? '<button class="text-button" data-retry-sync>Повторить</button>' : notice.action === 'login' ? '<button class="text-button" data-auth="login">Войти</button>' : ''}` : '';
+  }
+  function cancelAnswers() {
+    for (const controller of pending.values()) controller.abort();
+    pending.clear();
+    for (const chat of state.chats) for (const message of chat.messages) {
+      if (message.status === 'pending') message.status = 'interrupted';
+    }
+  }
+  function serializeChat(chat) {
+    return JSON.parse(JSON.stringify({ id: chat.id, title: chat.title, jurisdiction: chat.jurisdiction || '', createdAt: chat.createdAt, updatedAt: chat.updatedAt, messages: chat.messages }));
+  }
+  function sessionExpired() {
+    cancelAnswers();
+    sessionEpoch++;
+    user = null;
+    transitionBusy = false;
+    workspaceReady = true;
+    failedWrites.clear();
+    latestWrites.clear();
+    favoriteOperations.clear();
+    const recovered = guestImport;
+    state = emptyState();
+    state.chats = recovered;
+    state.activeChatId = recovered.some(chat => chat.id === guestSelection) ? guestSelection : recovered[0]?.id || null;
+    guestImport = [];
+    guestSelection = null;
+    authIntent = null;
+    showNotice('Сессия закончилась. Войдите ещё раз, чтобы открыть свои чаты и избранное.', 'login');
+    render();
+  }
+  function storageError(error, epoch) {
+    if (epoch !== sessionEpoch) return;
+    if (error.status === 401) { sessionExpired(); return; }
+    showNotice(error.status === 503
+      ? 'Хранилище временно недоступно. Изменения ещё не сохранены.'
+      : error.status === 422 ? 'Сервер не принял изменения. Проверьте ограничения чата и повторите сохранение.'
+      : 'Не удалось сохранить или загрузить данные. Проверьте соединение и повторите.');
+  }
+  function queueWrite(key, run, apply = () => {}) {
+    const epoch = sessionEpoch;
+    const owner = user?.id;
+    if (!owner) return Promise.resolve(false);
+    const job = { key, run, apply };
+    latestWrites.set(key, job);
+    const task = async () => {
+      try {
+        if (epoch !== sessionEpoch || user?.id !== owner || latestWrites.get(key) !== job) return false;
+        const response = await run();
+        if (epoch !== sessionEpoch || user?.id !== owner || latestWrites.get(key) !== job) return false;
+        failedWrites.delete(key);
+        apply(response);
+        if (!failedWrites.size && workspaceReady) showNotice(null);
+        return true;
+      } catch (error) {
+        if (epoch === sessionEpoch && latestWrites.get(key) === job) {
+          if (error.status !== 401) failedWrites.set(key, job);
+          storageError(error, epoch);
+        }
+        return false;
+      }
+    };
+    writeQueue = writeQueue.catch(() => {}).then(task);
+    return writeQueue;
+  }
+  function saveChatToServer(chat) {
+    if (!user || !workspaceReady || deletingChats.has(chat.id)) return;
+    const revision = (chatRevisions.get(chat.id) || 0) + 1;
+    chatRevisions.set(chat.id, revision);
+    const snapshot = serializeChat(chat);
+    void queueWrite('chat:' + chat.id, () => api.putChat(snapshot), saved => {
+      if (!state.chats.includes(chat) || chatRevisions.get(chat.id) !== revision || pending.has(chat.id)) return;
+      const draft = chat.draft || '';
+      const jurisdiction = chat.jurisdiction;
+      Object.assign(chat, saved, { draft, jurisdiction });
+      render();
+    });
+  }
+  function applyWorkspace(data) {
+    if (!data || !Array.isArray(data.chats) || !Array.isArray(data.favoriteArticles) || !Array.isArray(data.favoriteAnswers)) throw Object.assign(new Error('Invalid workspace'), { code: 'format' });
+    const preferences = readPreferences();
+    const drafts = preferences.drafts && typeof preferences.drafts === 'object' && !Array.isArray(preferences.drafts) ? preferences.drafts : {};
+    for (const chat of guestImport) {
+      if (chat.draft) drafts[chat.id] = { text: chat.draft, jurisdiction: chat.jurisdiction, createdAt: chat.createdAt };
+    }
+    const chats = data.chats.map(chat => ({ ...chat, jurisdiction: drafts[chat.id]?.jurisdiction ?? chat.jurisdiction, draft: typeof drafts[chat.id]?.text === 'string' ? drafts[chat.id].text : '' }));
+    for (const [key, draft] of Object.entries(drafts)) {
+      if (draft && /^[A-Za-z0-9_-]{1,64}$/.test(key) && typeof draft.text === 'string' && draft.text && !chats.some(chat => chat.id === key)) chats.push({ ...makeChat(), id: key, createdAt: draft.createdAt || new Date().toISOString(), jurisdiction: draft.jurisdiction || '', draft: draft.text });
+    }
+    const selection = guestSelection || state.activeChatId || preferences.activeChatId;
+    state = { chats, favoriteArticles: data.favoriteArticles, favoriteAnswers: data.favoriteAnswers, activeChatId: chats.some(chat => chat.id === selection) ? selection : chats[0]?.id || null };
+  }
+  async function loadAccountWorkspace() {
+    const epoch = sessionEpoch;
+    if (!user || transitionBusy) return false;
+    transitionBusy = true;
+    workspaceReady = false;
+    showNotice(guestImport.length ? 'Переносим ваши гостевые чаты…' : 'Загружаем ваши чаты…', null);
+    render();
+    try {
+      for (const chat of guestImport) {
+        await api.putChat(serializeChat(chat));
+        if (epoch !== sessionEpoch) return false;
+      }
+      const data = await api.workspace();
+      if (epoch !== sessionEpoch) return false;
+      applyWorkspace(data);
+      guestImport = [];
+      guestSelection = null;
+      workspaceReady = true;
+      showNotice(null);
+      persist();
+      return true;
+    } catch (error) { storageError(error, epoch); return false; }
+    finally {
+      if (epoch === sessionEpoch) { transitionBusy = false; render(); }
+    }
+  }
+  async function enterAccount(nextUser) {
+    captureDraft();
+    cancelAnswers();
+    guestImport = !user ? state.chats.filter(chat => chat.messages.length || chat.draft).map(chat => JSON.parse(JSON.stringify(chat))) : [];
+    guestSelection = state.activeChatId;
+    sessionEpoch++;
+    user = nextUser;
+    failedWrites.clear();
+    latestWrites.clear();
+    workspaceReady = false;
+    const loaded = await loadAccountWorkspace();
+    if (loaded) await completeAuthIntent();
+    return loaded;
+  }
+  async function completeAuthIntent() {
+    if (authIntent) {
+      const intent = authIntent;
+      authIntent = null;
+      if (intent.kind === 'article' && !state.favoriteArticles.includes(intent.id)) await saveArticle(intent.id);
+      if (intent.kind === 'answer' && !state.favoriteAnswers.some(item => item.message.id === intent.id)) await saveAnswer(intent.id);
+    }
+  }
+  function canEditWorkspace() {
+    if (transitionBusy || user && !workspaceReady) { notify('Дождитесь загрузки рабочего пространства или повторите подключение.'); return false; }
+    return true;
+  }
+  function requireAccount(kind, key) {
+    if (sessionChecking) { notify('Проверяем вход. Подождите немного.'); return false; }
+    if (!user) { authIntent = { kind, id: key }; openAuth(); notify('Войдите, чтобы добавить в избранное.'); return false; }
+    return canEditWorkspace();
+  }
+  async function retrySync() {
+    if (transitionBusy) return;
+    if (!user) { await initializeSession(); return; }
+    if (!workspaceReady) { if (await loadAccountWorkspace()) await completeAuthIntent(); return; }
+    for (const job of [...failedWrites.values()]) {
+      if (latestWrites.get(job.key) === job) await queueWrite(job.key, job.run, job.apply);
+    }
+  }
+  async function initializeSession() {
+    const epoch = sessionEpoch;
+    sessionChecking = true;
+    renderShell();
+    try {
+      const result = await api.session();
+      if (epoch === sessionEpoch && result?.user?.id) await enterAccount(result.user);
+    } catch (error) {
+      if (epoch === sessionEpoch && error.status !== 401) {
+        notify(error.status === 503 ? 'Вход временно недоступен. Можно пользоваться чатом без входа.' : 'Не удалось проверить вход. Проверьте соединение с сервером.');
+      }
+    } finally { sessionChecking = false; renderShell(); }
   }
   function notify(text) {
     const toast = document.getElementById('toast');
@@ -71,7 +248,7 @@
   }
   function captureDraft() {
     const composer = view.querySelector('[data-composer]');
-    if (!composer || page !== 'chat') return;
+    if (!composer || page !== 'chat' || transitionBusy || user && !workspaceReady) return;
     const text = composer.elements.message.value;
     if (!activeChat() && text.trim()) {
       const chat = makeChat();
@@ -141,6 +318,7 @@
     document.getElementById('chat-scroll')?.scrollTo({ top: 1000000 });
   }
   function newChat(draft = '') {
+    if (!canEditWorkspace()) return;
     captureDraft();
     const reusable = state.chats.find(chat => !chat.messages.length && !chat.draft);
     const chat = reusable || makeChat();
@@ -168,13 +346,15 @@
     const labels = { chat: 'Право рядом', sources: 'Источники', compare: 'Сравнение документов', saved: 'Избранное' };
     document.getElementById('breadcrumb-current').textContent = page === 'chat' && activeChat()?.messages.length ? activeChat().title : labels[page];
     document.getElementById('saved-count').textContent = state.favoriteArticles.length + state.favoriteAnswers.length;
+    renderStatus();
     const chats = state.chats.filter(chat => chat.messages.length || chat.draft).slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     document.getElementById('chat-history').innerHTML = chats.length ? chats.map(chat => `<div class="history-item ${page === 'chat' && chat.id === state.activeChatId ? 'is-active' : ''}"><button class="history-open" data-open-chat="${escape(chat.id)}" title="${escape(chat.title)}" ${page === 'chat' && chat.id === state.activeChatId ? 'aria-current="true"' : ''}>${escape(chat.title)}</button><button class="history-delete" data-delete-chat="${escape(chat.id)}" aria-label="Удалить чат: ${escape(chat.title)}">${icon('trash')}</button></div>`).join('') : '<p class="history-empty">Здесь появятся ваши диалоги.</p>';
     const trigger = document.getElementById('account-trigger');
     trigger.hidden = Boolean(user);
+    trigger.disabled = sessionChecking;
     document.getElementById('sidebar-account').innerHTML = user
-      ? `<div class="account-block"><span class="account-avatar">${escape((user.name || user.email).slice(0, 1).toUpperCase())}</span><div class="account-copy"><strong>${escape(user.name || 'Мой аккаунт')}</strong><small>${escape(user.email)}</small></div></div><button class="text-button" data-logout>Выйти из аккаунта</button>`
-      : `<div class="account-invite"><button class="button button-secondary" data-auth="login">${icon('user')} Личный кабинет</button></div>`;
+      ? `<div class="account-block"><span class="account-avatar">${escape((user.name || user.email).slice(0, 1).toUpperCase())}</span><div class="account-copy"><strong>${escape(user.name || 'Мой аккаунт')}</strong><small>${escape(user.email)}</small></div></div><button class="text-button" data-logout ${transitionBusy ? 'disabled' : ''}>Выйти из аккаунта</button>`
+      : `<div class="account-invite"><button class="button button-secondary" data-auth="login" ${sessionChecking ? 'disabled' : ''}>${icon('user')} Личный кабинет</button></div>`;
   }
   function render() {
     const scrollPosition = document.getElementById('chat-scroll')?.scrollTop || 0;
@@ -215,9 +395,10 @@
     lastRender = context;
   }
   function composer({ draft = '', jurisdiction = '', busy = false } = {}) {
+    const blocked = transitionBusy || user && !workspaceReady;
     return `<form class="composer" data-composer novalidate>
-      <textarea name="message" rows="2" maxlength="2000" aria-label="Сообщение навигатору" aria-describedby="composer-error" placeholder="Спросите об ИИ и персональных данных…">${escape(draft)}</textarea>
-      <div class="composer-bottom"><span class="jurisdiction-control"><select name="jurisdiction" aria-label="Юрисдикция"><option value="" ${jurisdiction === '' ? 'selected' : ''}>Россия и ЕС</option><option value="ru" ${jurisdiction === 'ru' ? 'selected' : ''}>Россия</option><option value="eu" ${jurisdiction === 'eu' ? 'selected' : ''}>Европейский союз</option></select>${icon('chevron')}</span>${busy ? `<button class="send-button" type="button" data-stop-answer aria-label="Остановить ответ" title="Остановить ответ">${icon('stop')}</button>` : `<button class="send-button" type="submit" aria-label="Отправить сообщение" title="Отправить · Enter">${icon('send')}</button>`}</div>
+      <textarea ${blocked ? 'disabled' : ''} name="message" rows="2" maxlength="2000" aria-label="Сообщение навигатору" aria-describedby="composer-error" placeholder="Спросите об ИИ и персональных данных…">${escape(draft)}</textarea>
+      <div class="composer-bottom"><span class="jurisdiction-control"><select name="jurisdiction" aria-label="Юрисдикция" ${blocked ? 'disabled' : ''}><option value="" ${jurisdiction === '' ? 'selected' : ''}>Россия и ЕС</option><option value="ru" ${jurisdiction === 'ru' ? 'selected' : ''}>Россия</option><option value="eu" ${jurisdiction === 'eu' ? 'selected' : ''}>Европейский союз</option></select>${icon('chevron')}</span>${busy ? `<button class="send-button" type="button" data-stop-answer aria-label="Остановить ответ" title="Остановить ответ">${icon('stop')}</button>` : `<button class="send-button" ${blocked ? 'disabled' : ''} type="submit" aria-label="Отправить сообщение" title="Отправить · Enter">${icon('send')}</button>`}</div>
       <p class="composer-error" id="composer-error" role="alert" hidden></p>
     </form>`;
   }
@@ -229,7 +410,7 @@
   function articleCard(article) {
     const doc = docFor(article.documentId);
     const saved = state.favoriteArticles.includes(article.id);
-    return `<article class="article-card" data-article="${escape(article.id)}"><div class="article-body"><div class="article-meta"><span class="article-number">${escape(doc.short)} · Статья ${escape(article.number)}</span><span>${escape(doc.jurisdiction)}</span></div><h2>${escape(article.title)}</h2><div class="article-actions"><a href="${escape(article.url)}" target="_blank" rel="noopener noreferrer">Первоисточник ↗</a><button class="text-button" data-topic="${escape(`Помоги разобраться в статье ${article.number} ${doc.short}: «${article.title}».`)}">Обсудить в чате</button></div></div><button class="save-button ${saved ? 'is-saved' : ''}" data-save-article="${escape(article.id)}" aria-pressed="${saved}" aria-label="${saved ? 'Убрать из избранного' : 'Добавить в избранное'}: ${escape(doc.short)}, статья ${escape(article.number)}">${icon('star')}</button></article>`;
+    return `<article class="article-card" data-article="${escape(article.id)}"><div class="article-body"><div class="article-meta"><span class="article-number">${escape(doc.short)} · Статья ${escape(article.number)}</span><span>${escape(doc.jurisdiction)}</span></div><h2>${escape(article.title)}</h2><div class="article-actions"><a href="${escape(article.url)}" target="_blank" rel="noopener noreferrer">Первоисточник ↗</a><button class="text-button" data-topic="${escape(`Помоги разобраться в статье ${article.number} ${doc.short}: «${article.title}».`)}">Обсудить в чате</button></div></div><button class="save-button ${saved ? 'is-saved' : ''}" data-save-article="${escape(article.id)}" ${favoriteOperations.has('article:' + article.id) ? 'disabled aria-busy="true"' : ''} aria-pressed="${saved}" aria-label="${saved ? 'Убрать из избранного' : 'Добавить в избранное'}: ${escape(doc.short)}, статья ${escape(article.number)}">${icon('star')}</button></article>`;
   }
   function renderSources() {
     const shown = articles.filter(article => sourceFilter === 'all' || article.documentId === sourceFilter);
@@ -282,7 +463,7 @@
   function renderMessage(message, chat) {
     const saved = state.favoriteAnswers.some(item => item.message.id === message.id);
     const failed = ['error', 'interrupted'].includes(message.status);
-    return `<article class="message message-${message.role}" id="message-${escape(message.id)}"><div class="message-label">${icon('mark')} ${message.role === 'user' ? 'Вы' : 'Право рядом'}</div><div class="message-content">${message.role === 'assistant' ? renderAnswerText(message) : escape(message.text)}</div>${renderCitations(message.citations, message.id)}${failed ? `<div class="message-error" role="status">${escape(errorMessage(message))}</div><button class="text-button" data-retry="${escape(message.id)}" ${pending.has(chat.id) ? 'disabled' : ''}>Повторить запрос</button>` : ''}${message.role === 'assistant' ? `<div class="message-actions"><button class="icon-button" data-copy-answer="${escape(message.id)}" aria-label="Скопировать ответ" title="Скопировать ответ">${icon('copy')}</button><button class="icon-button ${saved ? 'is-saved' : ''}" data-save-answer="${escape(message.id)}" aria-label="${saved ? 'Убрать ответ из избранного' : 'Добавить ответ в избранное'}" title="${saved ? 'В избранном' : 'В избранное'}" aria-pressed="${saved}">${icon('star')}</button></div>` : ''}</article>`;
+    return `<article class="message message-${message.role}" id="message-${escape(message.id)}"><div class="message-label">${icon('mark')} ${message.role === 'user' ? 'Вы' : 'Право рядом'}</div><div class="message-content">${message.role === 'assistant' ? renderAnswerText(message) : escape(message.text)}</div>${renderCitations(message.citations, message.id)}${failed ? `<div class="message-error" role="status">${escape(errorMessage(message))}</div><button class="text-button" data-retry="${escape(message.id)}" ${pending.has(chat.id) ? 'disabled' : ''}>Повторить запрос</button>` : ''}${message.role === 'assistant' ? `<div class="message-actions"><button class="icon-button" data-copy-answer="${escape(message.id)}" aria-label="Скопировать ответ" title="Скопировать ответ">${icon('copy')}</button><button class="icon-button ${saved ? 'is-saved' : ''}" data-save-answer="${escape(message.id)}" ${favoriteOperations.has('answer:' + message.id) ? 'disabled aria-busy="true"' : ''} aria-label="${saved ? 'Убрать ответ из избранного' : 'Добавить ответ в избранное'}" title="${saved ? 'В избранном' : 'В избранное'}" aria-pressed="${saved}">${icon('star')}</button></div>` : ''}</article>`;
   }
   function renderChat() {
     const chat = activeChat();
@@ -294,12 +475,14 @@
       : `<section class="chat-page is-empty" aria-label="Новый чат"><div class="chat-intro">${icon('mark')}<h1>Что разберём сегодня?</h1><p>ИИ и защита данных. С опорой на документы.</p></div>${form}${prompts()}</section>`;
   }
   function renderSaved() {
+    if (!user) return heading('Ваша подборка', 'Избранное', 'Полезные ответы и статьи, к которым хочется вернуться.') + `<div class="empty-state"><span class="empty-icon" aria-hidden="true">${icon('star')}</span><h2>Избранное в вашем аккаунте</h2><p>Войдите, чтобы сохранять ответы и статьи и открывать их на любом устройстве.</p><button class="button button-primary" data-auth="login">Войти</button></div>`;
+    if (!workspaceReady) return heading('Ваша подборка', 'Избранное', 'Загружаем сохранённые ответы и статьи…');
     const selected = articles.filter(article => state.favoriteArticles.includes(article.id));
     const tabs = `<div class="tab-list" aria-label="Тип избранного"><button class="filter-button ${savedTab === 'answers' ? 'is-active' : ''}" aria-pressed="${savedTab === 'answers'}" data-saved-tab="answers">Ответы · ${state.favoriteAnswers.length}</button><button class="filter-button ${savedTab === 'articles' ? 'is-active' : ''}" aria-pressed="${savedTab === 'articles'}" data-saved-tab="articles">Статьи · ${selected.length}</button></div>`;
     const empty = `<div class="empty-state"><span class="empty-icon" aria-hidden="true">${icon('star')}</span><h2>${savedTab === 'answers' ? 'Сохраните полезный ответ' : 'Соберите нужные статьи'}</h2><p>${savedTab === 'answers' ? 'Нажмите «В избранное» под ответом в чате, чтобы быстро вернуться к нему.' : 'Нажмите на звёздочку у статьи в разделе «Источники».'}</p><button class="button button-secondary" data-nav="${savedTab === 'answers' ? 'chat' : 'sources'}">${savedTab === 'answers' ? 'Открыть чат' : 'Перейти к источникам'} →</button></div>`;
     let content;
     if (savedTab === 'articles') content = selected.length ? `<div class="article-list">${selected.map(articleCard).join('')}</div>` : empty;
-    else content = state.favoriteAnswers.length ? `<div class="favorite-list">${state.favoriteAnswers.map(item => `<article class="favorite-card"><div class="favorite-heading"><div><p>${shortDate(item.savedAt)} · Ответ навигатора</p><h2>${escape(item.question)}</h2></div><button class="save-button is-saved" data-remove-answer="${escape(item.message.id)}" aria-label="Убрать ответ из избранного">${icon('star')}</button></div><div class="message-content">${renderAnswerText(item.message)}</div>${renderCitations(item.message.citations, item.message.id)}${state.chats.some(chat => chat.id === item.chatId) ? `<button class="text-button" data-open-chat="${escape(item.chatId)}" data-message="${escape(item.message.id)}">Перейти к диалогу →</button>` : ''}</article>`).join('')}</div>` : empty;
+    else content = state.favoriteAnswers.length ? `<div class="favorite-list">${state.favoriteAnswers.map(item => `<article class="favorite-card"><div class="favorite-heading"><div><p>${shortDate(item.savedAt)} · Ответ навигатора</p><h2>${escape(item.question)}</h2></div><button class="save-button is-saved" data-remove-answer="${escape(item.message.id)}" ${favoriteOperations.has('answer:' + item.message.id) ? 'disabled aria-busy="true"' : ''} aria-label="Убрать ответ из избранного">${icon('star')}</button></div><div class="message-content">${renderAnswerText(item.message)}</div>${renderCitations(item.message.citations, item.message.id)}${state.chats.some(chat => chat.id === item.chatId) ? `<button class="text-button" data-open-chat="${escape(item.chatId)}" data-message="${escape(item.message.id)}">Перейти к диалогу →</button>` : ''}</article>`).join('')}</div>` : empty;
     return heading('Ваша подборка', 'Избранное', 'Полезные ответы и статьи, к которым хочется вернуться.') + tabs + content;
   }
 
@@ -316,6 +499,7 @@
     message.status = 'pending';
     delete message.errorText;
     persist();
+    saveChatToServer(chat);
     render();
     document.getElementById('chat-scroll')?.scrollTo({ top: 1000000 });
     try {
@@ -332,6 +516,7 @@
       if (state.chats.includes(chat)) {
         chat.updatedAt = new Date().toISOString();
         persist();
+        saveChatToServer(chat);
         if (page === 'chat' && state.activeChatId === chat.id) {
           const scroller = document.getElementById('chat-scroll');
           const nearBottom = scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 140;
@@ -343,9 +528,11 @@
     }
   }
   async function sendMessage(form) {
+    if (!canEditWorkspace() || deletingChats.has(state.activeChatId)) return;
     const text = form.elements.message.value.trim();
     if (!text || text.length > 2000) { const error = form.querySelector('#composer-error'); error.hidden = false; error.textContent = text.length > 2000 ? 'Вопрос должен быть не длиннее 2000 символов.' : 'Введите вопрос.'; form.elements.message.setAttribute('aria-invalid', 'true'); form.elements.message.focus(); return; }
     const jurisdiction = form.elements.jurisdiction.value;
+    if (activeChat()?.messages.length > 198) { const error = form.querySelector('#composer-error'); error.hidden = false; error.textContent = 'В чате достигнут лимит 200 сообщений. Начните новый диалог.'; return; }
     if (!activeChat()) newChat();
     const chat = activeChat();
     if (pending.has(chat.id)) return;
@@ -356,25 +543,46 @@
     if (chat.messages.length === 1) chat.title = text.length > 65 ? text.slice(0, 65) + '…' : text;
     await receiveAnswer(chat, message);
   }
-  function saveArticle(key) {
-    if (!articles.some(article => article.id === key)) return;
+  async function saveArticle(key) {
+    if (!articles.some(article => article.id === key) || !requireAccount('article', key)) return;
+    const operation = 'article:' + key;
+    if (favoriteOperations.has(operation)) return;
+    favoriteOperations.add(operation);
     captureDraft();
     const saved = state.favoriteArticles.includes(key);
-    state.favoriteArticles = saved ? state.favoriteArticles.filter(item => item !== key) : [...state.favoriteArticles, key];
-    persist(); render(); notify(saved ? 'Статья убрана из избранного' : 'Статья добавлена в избранное');
+    render();
+    const success = await queueWrite(operation, () => api.article(key, !saved), () => {
+      state.favoriteArticles = saved ? state.favoriteArticles.filter(item => item !== key) : [...new Set([...state.favoriteArticles, key])];
+      render();
+    });
+    favoriteOperations.delete(operation);
+    render();
+    if (success) notify(saved ? 'Статья убрана из избранного' : 'Статья добавлена в избранное');
   }
-  function saveAnswer(key) {
+  async function saveAnswer(key) {
+    if (!requireAccount('answer', key)) return;
+    const operation = 'answer:' + key;
+    if (favoriteOperations.has(operation)) return;
+    favoriteOperations.add(operation);
     captureDraft();
     const existing = state.favoriteAnswers.some(item => item.message.id === key);
-    if (existing) state.favoriteAnswers = state.favoriteAnswers.filter(item => item.message.id !== key);
-    else {
+    let favorite = null;
+    if (!existing) {
       const chat = state.chats.find(chat => chat.messages.some(message => message.id === key && message.role === 'assistant'));
-      if (!chat) return;
+      if (!chat) { favoriteOperations.delete(operation); return; }
       const index = chat.messages.findIndex(message => message.id === key);
       const question = chat.messages.slice(0, index).reverse().find(message => message.role === 'user')?.text || chat.title;
-      state.favoriteAnswers.unshift({ chatId: chat.id, question, message: JSON.parse(JSON.stringify(chat.messages[index])), savedAt: new Date().toISOString() });
+      favorite = { chatId: chat.id, question, message: JSON.parse(JSON.stringify(chat.messages[index])), savedAt: new Date().toISOString() };
     }
-    persist(); render(); notify(existing ? 'Ответ убран из избранного' : 'Ответ добавлен в избранное');
+    render();
+    const success = await queueWrite(operation, () => api.answer(key, favorite), () => {
+      state.favoriteAnswers = state.favoriteAnswers.filter(item => item.message.id !== key);
+      if (favorite) state.favoriteAnswers.unshift(favorite);
+      render();
+    });
+    favoriteOperations.delete(operation);
+    render();
+    if (success) notify(existing ? 'Ответ убран из избранного' : 'Ответ добавлен в избранное');
   }
   function openChat(key, messageId) {
     if (!state.chats.some(chat => chat.id === key)) return;
@@ -386,25 +594,47 @@
     else document.getElementById('chat-scroll')?.scrollTo({ top: 1000000 });
     view.focus({ preventScroll: true });
   }
-  function deleteChat(key) {
+  async function deleteChat(key) {
+    if (!canEditWorkspace() || deletingChats.has(key)) return;
     const chat = state.chats.find(item => item.id === key);
     if (!chat || !window.confirm('Удалить этот чат? Избранные ответы сохранятся.')) return;
     captureDraft();
+    deletingChats.add(key);
     pending.get(key)?.abort();
     pending.delete(key);
-    state.chats = state.chats.filter(item => item.id !== key);
-    if (state.activeChatId === key) state.activeChatId = null;
-    persist(); render(); notify('Чат удалён');
+    const remove = () => {
+      state.chats = state.chats.filter(item => item.id !== key);
+      if (state.activeChatId === key) state.activeChatId = null;
+      persist(); render();
+    };
+    const success = user ? await queueWrite('chat:' + key, () => api.deleteChat(key), remove) : (remove(), true);
+    deletingChats.delete(key);
+    if (success) notify('Чат удалён');
   }
-  function switchWorkspace(nextUser) {
+  async function logout() {
+    if (transitionBusy) return;
     captureDraft();
-    for (const controller of pending.values()) controller.abort();
-    pending.clear();
-    user = nextUser;
-    state = loadState();
-    page = 'chat';
-    history.replaceState(null, '', '#chat');
-    closeMenu(); render();
+    cancelAnswers();
+    for (const chat of state.chats) if (chat.messages.length) saveChatToServer(chat);
+    transitionBusy = true;
+    render();
+    try {
+      await writeQueue;
+      if (!user) return;
+      await api.logout();
+      const unsaved = failedWrites.size;
+      sessionEpoch++;
+      user = null;
+      state = emptyState();
+      guestImport = [];
+      guestSelection = null;
+      failedWrites.clear();
+      latestWrites.clear();
+      workspaceReady = true;
+      showNotice(null);
+      notify(unsaved ? 'Вы вышли. Часть изменений не удалось сохранить.' : 'Вы вышли из аккаунта');
+    } catch (error) { storageError(error, sessionEpoch); }
+    finally { transitionBusy = false; render(); }
   }
 
   function openAuth(mode = 'login') {
@@ -423,7 +653,7 @@
     dialog.classList.remove('is-closing');
     const register = mode === 'register';
     dialog.innerHTML = `<button class="icon-button dialog-close" data-close-auth aria-label="Закрыть окно">${icon('close')}</button><div class="auth-mark" aria-hidden="true">${icon('mark')}</div><h2 id="auth-title">${register ? 'Создать аккаунт' : 'С возвращением'}</h2><p>${register ? 'Ваш личный навигатор.' : 'Войдите в личный кабинет навигатора.'}</p><div class="auth-tabs" aria-label="Вход или регистрация"><button class="auth-tab ${!register ? 'is-active' : ''}" aria-pressed="${!register}" data-auth="login">Вход</button><button class="auth-tab ${register ? 'is-active' : ''}" aria-pressed="${register}" data-auth="register">Регистрация</button><span class="auth-tab-indicator" aria-hidden="true"></span></div>
-      <form data-auth-form="${mode}">${register ? '<label class="field">Имя<input name="name" autocomplete="name" maxlength="100" required placeholder="Как к вам обращаться" /></label>' : ''}<label class="field">Электронная почта<input type="email" name="email" autocomplete="username" required placeholder="you@example.com" /></label><label class="field">Пароль<span class="password-field"><input type="password" id="auth-password" name="password" autocomplete="${register ? 'new-password' : 'current-password'}" ${register ? 'minlength="8"' : ''} maxlength="200" required ${register ? 'aria-describedby="password-hint"' : ''} /><button class="password-toggle" type="button" data-toggle-password="auth-password" aria-pressed="false">Показать</button></span>${register ? '<small class="field-hint" id="password-hint">Не менее 8 символов</small>' : ''}</label>${register ? '<label class="field">Повторите пароль<input type="password" name="passwordConfirmation" autocomplete="new-password" required minlength="8" maxlength="200" /></label>' : ''}<div class="form-error" id="auth-error" role="alert" hidden></div><button class="button button-primary auth-submit" type="submit">${register ? 'Создать аккаунт' : 'Войти'}</button></form>`;
+      <form data-auth-form="${mode}">${register ? '<label class="field">Имя<input name="name" autocomplete="name" maxlength="100" required placeholder="Как к вам обращаться" /></label>' : ''}<label class="field">Электронная почта<input type="email" name="email" autocomplete="username" required placeholder="you@example.com" /></label><label class="field">Пароль<span class="password-field"><input type="password" id="auth-password" name="password" autocomplete="${register ? 'new-password' : 'current-password'}" ${register ? 'minlength="8"' : ''} maxlength="128" required ${register ? 'aria-describedby="password-hint"' : ''} /><button class="password-toggle" type="button" data-toggle-password="auth-password" aria-pressed="false">Показать</button></span>${register ? '<small class="field-hint" id="password-hint">Не менее 8 символов</small>' : ''}</label>${register ? '<label class="field">Повторите пароль<input type="password" name="passwordConfirmation" autocomplete="new-password" required minlength="8" maxlength="128" /></label>' : ''}<div class="form-error" id="auth-error" role="alert" hidden></div><button class="button button-primary auth-submit" type="submit">${register ? 'Создать аккаунт' : 'Войти'}</button></form>`;
     if (!dialog.open) dialog.showModal();
     const form = dialog.querySelector('[data-auth-form]');
     form.elements.email.value = savedEmail;
@@ -491,11 +721,11 @@
     submit.textContent = mode === 'register' ? 'Создаём аккаунт…' : 'Входим…';
     try {
       const nextUser = await api.authenticate(mode, { email: fields.get('email').trim(), password: fields.get('password'), ...(mode === 'register' ? { name: fields.get('name').trim() } : {}) });
-      switchWorkspace(nextUser);
+      const loaded = await enterAccount(nextUser);
       closeAuth(true);
-      notify('Вы вошли в аккаунт');
+      if (loaded) notify('Вы вошли в аккаунт');
     } catch (failure) {
-      showError(failure.status === 401 ? 'Неверная почта или пароль.' : failure.status === 409 ? 'Эта почта уже зарегистрирована. Войдите в аккаунт.' : 'Сервис входа недоступен. Попробуйте позже.');
+      showError(failure.status === 401 ? 'Неверная почта или пароль.' : failure.status === 409 ? 'Эта почта уже зарегистрирована. Войдите в аккаунт.' : failure.status === 422 ? 'Проверьте имя, почту и пароль (от 8 до 128 символов).' : failure.status === 503 ? 'Вход временно недоступен. Попробуйте позже. Чатом можно пользоваться без входа.' : 'Не удалось связаться с сервисом входа. Попробуйте ещё раз.');
     } finally {
       authBusy = false;
       buttons.forEach(button => { button.disabled = false; });
@@ -516,10 +746,11 @@
     }
     const target = event.target.closest('button, a');
     if (!target) return;
+    if (target.hasAttribute('data-retry-sync')) { void retrySync(); return; }
     if (target.hasAttribute('data-new-chat')) { newChat(); return; }
     if (target.dataset.nav) { event.preventDefault(); navTo(target.dataset.nav); return; }
     if (target.dataset.topic) { newChat(target.dataset.topic); return; }
-    if (target.dataset.document) { navTo('sources'); sourceFilter = target.dataset.document; render(); return; }
+    if (target.dataset.document) { sourceFilter = target.dataset.document; navTo('sources'); return; }
     if (target.dataset.filter) { sourceFilter = target.dataset.filter; render(); return; }
     if (target.dataset.saveArticle) { saveArticle(target.dataset.saveArticle); return; }
     if (target.dataset.saveAnswer) { saveAnswer(target.dataset.saveAnswer); return; }
@@ -532,7 +763,7 @@
     if (target.dataset.copyAnswer) { const message = state.chats.flatMap(chat => chat.messages).find(message => message.id === target.dataset.copyAnswer); if (message) navigator.clipboard.writeText(message.text).then(() => notify('Ответ скопирован')).catch(() => notify('Не удалось скопировать ответ')); return; }
     if (target.dataset.retry) {
       const chat = activeChat(); const message = chat?.messages.find(item => item.id === target.dataset.retry);
-      if (message) { captureDraft(); void receiveAnswer(chat, message); } return;
+      if (message && canEditWorkspace()) { captureDraft(); void receiveAnswer(chat, message); } return;
     }
     if (target.dataset.auth) { closeMenu(); openAuth(target.dataset.auth); return; }
     if (target.hasAttribute('data-close-auth')) { closeAuth(); return; }
@@ -543,8 +774,7 @@
       target.setAttribute('aria-pressed', String(field.type === 'text')); return;
     }
     if (target.hasAttribute('data-logout')) {
-      target.disabled = true;
-      api.logout().then(() => { switchWorkspace(null); notify('Вы вышли из аккаунта'); }).catch(() => { target.disabled = false; notify('Не удалось выйти. Попробуйте ещё раз.'); });
+      void logout();
     }
   });
   document.addEventListener('submit', event => {
@@ -592,6 +822,7 @@
     if (authLayoutAnimation) { authLayoutAnimation.onfinish = null; authLayoutAnimation.cancel(); authLayoutAnimation = null; }
     dialog.classList.remove('is-closing', 'is-switching');
     dialog.innerHTML = '';
+    if (!user) authIntent = null;
   });
   dialog.addEventListener('click', event => { if (event.target === dialog && !authBusy) { const box = dialog.getBoundingClientRect(); if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) closeAuth(); } });
   window.addEventListener('hashchange', () => {
@@ -601,5 +832,5 @@
   window.addEventListener('pagehide', captureDraft);
   render();
   api.catalog().then(catalog => { if (catalog) applyCatalog(catalog); }).catch(() => { notify('Не удалось обновить каталог. Попробуйте перезагрузить страницу.'); });
-  if (api.hasAuth) api.session().then(data => { if (data?.user?.id && data.user.email) switchWorkspace(data.user); }).catch(() => {});
+  void initializeSession();
 })();

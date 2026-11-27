@@ -33,7 +33,7 @@ window.NavigatorApi = (() => {
       timeoutMs: Number.isFinite(config.chatTimeoutMs) && config.chatTimeoutMs > 0 ? config.chatTimeoutMs : 210000
     });
   }
-  // Маршруты авторизации и каталога подключаются отдельно, когда появятся на сервере.
+  // Авторизация использует HttpOnly-cookie; токены не доступны JavaScript.
   async function authenticate(mode, fields) {
     const data = await request(`${config.authBase || '/api/auth'}/${mode === 'register' ? 'register' : 'login'}`, { method: 'POST', body: JSON.stringify(fields) });
     if (!data?.user?.id || !data.user.email) throw new ApiError('format');
@@ -42,5 +42,11 @@ window.NavigatorApi = (() => {
   const catalog = () => config.catalogEndpoint ? request(config.catalogEndpoint) : Promise.resolve(null);
   const logout = () => request(`${config.authBase || '/api/auth'}/logout`, { method: 'POST' });
   const session = () => request(`${config.authBase || '/api/auth'}/me`);
-  return { chat, authenticate, catalog, logout, session, hasAuth: Boolean(config.authBase) };
+  const workspaceBase = config.workspaceBase || '/api';
+  const workspace = () => request(`${workspaceBase}/workspace`);
+  const putChat = chat => request(`${workspaceBase}/chats/${encodeURIComponent(chat.id)}`, { method: 'PUT', body: JSON.stringify(chat) });
+  const deleteChat = id => request(`${workspaceBase}/chats/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  const article = (id, saved) => request(`${workspaceBase}/favorites/articles/${encodeURIComponent(id)}`, { method: saved ? 'PUT' : 'DELETE' });
+  const answer = (id, value) => request(`${workspaceBase}/favorites/answers/${encodeURIComponent(id)}`, { method: value ? 'PUT' : 'DELETE', ...(value ? { body: JSON.stringify(value) } : {}) });
+  return { chat, authenticate, catalog, logout, session, workspace, putChat, deleteChat, article, answer };
 })();
