@@ -1,0 +1,176 @@
+[
+  {
+    "id": "Q01",
+    "type": "answerable",
+    "query": "Хочу десерт с бананом",
+    "ingredient": "банан",
+    "goldDocIds": [
+      "D01",
+      "D02",
+      "D03"
+    ]
+  },
+  {
+    "id": "Q02",
+    "type": "answerable",
+    "query": "Найди что-нибудь с шоколадом",
+    "ingredient": "шоколад",
+    "goldDocIds": [
+      "D03",
+      "D04",
+      "D05",
+      "D06",
+      "D14",
+      "D28",
+      "D30"
+    ]
+  },
+  {
+    "id": "Q03",
+    "type": "answerable",
+    "query": "Подбери сладкое с яблоком",
+    "ingredient": "яблоко",
+    "goldDocIds": [
+      "D07",
+      "D08",
+      "D09",
+      "D20"
+    ]
+  },
+  {
+    "id": "Q04",
+    "type": "answerable",
+    "query": "Хочу десерт с творогом",
+    "ingredient": "творог",
+    "goldDocIds": [
+      "D09",
+      "D10",
+      "D11",
+      "D12",
+      "D14",
+      "D18"
+    ]
+  },
+  {
+    "id": "Q05",
+    "type": "answerable",
+    "query": "Подбери десерт с малиной",
+    "ingredient": "малина",
+    "goldDocIds": [
+      "D13",
+      "D14",
+      "D15"
+    ]
+  },
+  {
+    "id": "Q06",
+    "type": "answerable",
+    "query": "Подбери что-нибудь с тыквой",
+    "ingredient": "тыква",
+    "goldDocIds": [
+      "D02",
+      "D16",
+      "D17",
+      "D18"
+    ]
+  },
+  {
+    "id": "Q07",
+    "type": "answerable",
+    "query": "Хочу что-нибудь с морковью",
+    "ingredient": "морковь",
+    "goldDocIds": [
+      "D19",
+      "D20",
+      "D21"
+    ]
+  },
+  {
+    "id": "Q08",
+    "type": "answerable",
+    "query": "Найди десерт с лимоном",
+    "ingredient": "лимон",
+    "goldDocIds": [
+      "D02",
+      "D05",
+      "D07",
+      "D13",
+      "D15",
+      "D22",
+      "D23",
+      "D24"
+    ]
+  },
+  {
+    "id": "Q09",
+    "type": "answerable",
+    "query": "Подбери десерт с апельсином",
+    "ingredient": "апельсин",
+    "goldDocIds": [
+      "D07",
+      "D08",
+      "D10",
+      "D18",
+      "D21",
+      "D25",
+      "D26",
+      "D27"
+    ]
+  },
+  {
+    "id": "Q10",
+    "type": "answerable",
+    "query": "Хочу десерт с орехами",
+    "ingredient": "орехи",
+    "goldDocIds": [
+      "D02",
+      "D03",
+      "D04",
+      "D08",
+      "D12",
+      "D16",
+      "D19",
+      "D21",
+      "D25",
+      "D26",
+      "D28",
+      "D29",
+      "D30"
+    ]
+  },
+  {
+    "id": "Q11",
+    "type": "trap",
+    "query": "Как приготовить куриный суп?",
+    "goldDocIds": [],
+    "expected": "refusal"
+  },
+  {
+    "id": "Q12",
+    "type": "trap",
+    "query": "Найди торт из лунной пыли и марсианского песка.",
+    "goldDocIds": [],
+    "expected": "refusal"
+  },
+  {
+    "id": "Q13",
+    "type": "trap",
+    "query": "Киберкрокодильный фламбедир.",
+    "goldDocIds": [],
+    "expected": "refusal"
+  },
+  {
+    "id": "Q14",
+    "type": "trap",
+    "query": "Подбери пирог из звездной пыли.",
+    "goldDocIds": [],
+    "expected": "refusal"
+  },
+  {
+    "id": "Q15",
+    "type": "trap",
+    "query": "Подбери печенье из метеоритной крошки и облачной ваты.",
+    "goldDocIds": [],
+    "expected": "refusal"
+  }
+]
